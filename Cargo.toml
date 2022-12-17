@@ -1,0 +1,16 @@
+[package]
+name = "farcaster"
+version = "0.1.0"
+authors = ["Ferrah Aiko <ferrahwolfeh@proton.me>"]
+edition = "2021"
+license = "MIT"
+description = "Utility to securely fire commands and data to a server over TCP"
+
+[dependencies]
+byteorder = "1.3.4"
+structopt = "0.3.14"
+bincode = "1.3.3"
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
