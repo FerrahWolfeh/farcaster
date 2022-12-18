@@ -6,35 +6,94 @@
 //!
 //!
 
+use aes_gcm::aead::consts::U12;
+use aes_gcm::aead::Aead;
+use aes_gcm::aes::Aes256;
+use aes_gcm::{AesGcm, KeyInit, Nonce};
 use log::{debug, trace};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, TcpStream};
 
 pub mod error;
 
-pub trait Payload {
-    type Struct;
-
-    fn encrypt(self, key: &[u8]) -> Vec<u8>;
-    fn decrypt(encoded: Vec<u8>, key: &[u8]) -> Self::Struct;
-    fn decode(encoded: Vec<u8>) -> Self::Struct;
-    fn encode(self) -> Vec<u8>;
-}
-
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FCPayload<S: std::fmt::Debug + Payload + Serialize> {
+pub struct FCPayload {
     pub descriptor: u8,
-    payload: S,
+    payload: Vec<u8>,
+    metadata: Vec<u8>,
 }
 
-impl<S: std::fmt::Debug + Payload + Serialize> FCPayload<S> {
-    pub fn _raw(&self) -> Vec<u8> {
-        Vec::new()
+impl FCPayload {
+    pub fn override_descriptor(&mut self, byte: u8) {
+        self.descriptor = byte;
     }
 
-    pub fn payload_encrypted(&self, _key: &[u8]) -> Vec<u8> {
-        Vec::new()
+    pub fn insert_raw_payload<P>(&mut self, payload: P) -> &mut Self
+    where
+        P: std::fmt::Debug + Serialize + DeserializeOwned,
+    {
+        debug!("Inserted payload: {payload:?}");
+
+        self.payload = bincode::serialize(&payload).unwrap();
+
+        trace!("Serialized payload data: {:X?}", &self.payload);
+        self
+    }
+
+    pub fn insert_metadata<P>(&mut self, meta: P) -> &mut Self
+    where
+        P: std::fmt::Debug + Serialize + DeserializeOwned,
+    {
+        debug!("Inserted payload: {meta:?}");
+
+        self.metadata = bincode::serialize(&meta).unwrap();
+
+        trace!("Serialized payload data: {:X?}", &self.metadata);
+        self
+    }
+
+    pub fn decode_metadata<P: DeserializeOwned + Sized>(&self) -> P {
+        let deserialized: P = bincode::deserialize(&self.metadata).unwrap();
+        deserialized
+    }
+
+    pub fn encrypt_payload(&mut self, key: &[u8; 256], nonce: &[u8; 96]) {
+        let cipher: AesGcm<Aes256, U12> = AesGcm::new_from_slice(key).unwrap();
+
+        let key_nonce = Nonce::from_slice(nonce); // 96-bits; Usually both servers should already know the same key at this point.
+
+        let encrypted_load = cipher.encrypt(key_nonce, self.payload.as_ref()).unwrap();
+
+        self.payload = encrypted_load;
+
+        trace!("Encrypted payload data: {:X?}", self.payload);
+
+        if cfg!(debug_assertions) {
+            let test_decode = cipher.decrypt(key_nonce, self.payload.as_ref()).unwrap();
+            assert_eq!(&test_decode, &self.payload);
+        }
+    }
+
+    pub fn decode_raw_payload<P: DeserializeOwned + Sized>(&self) -> P {
+        let deserialized: P = bincode::deserialize(&self.payload).unwrap();
+        deserialized
+    }
+
+    pub fn decode_encrypted_payload<P: DeserializeOwned + Sized>(
+        &self,
+        key: &[u8; 256],
+        nonce: &[u8; 96],
+    ) -> P {
+        let cipher: AesGcm<Aes256, U12> = AesGcm::new_from_slice(key).unwrap();
+
+        let key_nonce = Nonce::from_slice(nonce); // 96-bits; Same thing as up there.
+
+        let decoded = cipher.decrypt(key_nonce, self.payload.as_ref()).unwrap();
+
+        let deserialized: P = bincode::deserialize(&decoded).unwrap();
+        deserialized
     }
 }
 
@@ -63,15 +122,15 @@ impl<S: std::fmt::Debug + Payload + Serialize> FCPayload<S> {
 //     }
 // }
 
-/// Abstracted Protocol that wraps a TcpStream and manages
+/// Abstracted protocol that wraps a TcpStream and manages
 /// sending & receiving of messages
-pub struct CannonLauncher<S: std::fmt::Debug + Payload + Serialize> {
+pub struct CannonLauncher {
     reader: io::BufReader<TcpStream>,
     stream: TcpStream,
-    payload: Option<FCPayload<S>>,
+    payload: Option<FCPayload>,
 }
 
-impl<S: std::fmt::Debug + Payload + Serialize> CannonLauncher<S> {
+impl CannonLauncher {
     /// Wrap a TcpStream with Protocol
     pub fn with_stream(stream: TcpStream) -> io::Result<Self> {
         Ok(Self {
@@ -81,7 +140,7 @@ impl<S: std::fmt::Debug + Payload + Serialize> CannonLauncher<S> {
         })
     }
 
-    pub fn set_payload(&mut self, payload: FCPayload<S>) -> &mut Self {
+    pub fn set_payload(&mut self, payload: FCPayload) -> &mut Self {
         self.payload = Some(payload);
 
         trace!("Current payload in [{:p}]: {:?}", &self, self.payload);
@@ -113,12 +172,11 @@ impl<S: std::fmt::Debug + Payload + Serialize> CannonLauncher<S> {
     ///
     /// NOTE: Will block until there's data to read (or deserialize fails with io::ErrorKind::Interrupted)
     ///       so only use when a message is expected to arrive
-    #[allow(clippy::unused_io_amount)]
-    pub fn read_message(&mut self) -> Result<(), io::Error> {
+    pub fn read_message(&mut self) -> Result<FCPayload, io::Error> {
         let outbuffer = self.reader.fill_buf()?;
 
-        let _abuf = outbuffer.to_vec();
+        let decoded_pl: FCPayload = bincode::deserialize(outbuffer).unwrap();
 
-        Ok(())
+        Ok(decoded_pl)
     }
 }
