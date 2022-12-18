@@ -1,6 +1,6 @@
 [package]
 name = "farcaster"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Ferrah Aiko <ferrahwolfeh@proton.me>"]
 edition = "2021"
 license = "MIT"
