@@ -1,69 +1,40 @@
-//! Message Serialization/Deserialization (Protocol) for client <-> server communication
+//! # Encrypted message passing protocol FarCaster.
 //!
-//! Ideally you would use some existing Serialization/Deserialization,
-//! but this is here to see what's going on under the hood.
+//! This utility helps passing arbitrary data over a TCP connection with the option of it being encrypted or not.
+//!
+//! Useful for passing basic commands or complex bytecode to and from any device that has a network connection.
+//!
 //!
 
+use log::{debug, trace};
 use serde::{Deserialize, Serialize};
-use std::convert::From;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, TcpStream};
 
-pub const DEFAULT_SERVER_ADDR: &str = "127.0.0.1:4000";
+pub mod error;
 
-/// The default memory layout for this cast is as follows:
-/// ```ignore
-/// |    u16     |     [u8]     |     u16    |     [u8]     |   i64   |
-/// |   length   |   username   |   length   |   password   |  expiry |
-/// ```
-///
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FireCmd {
-    pub username: String,
-    pub password: String,
-    pub expiry: i64,
+pub trait Payload {
+    type Struct;
+
+    fn encrypt(self, key: &[u8]) -> Vec<u8>;
+    fn decrypt(encoded: Vec<u8>, key: &[u8]) -> Self::Struct;
+    fn decode(encoded: Vec<u8>) -> Self::Struct;
+    fn encode(self) -> Vec<u8>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FCPayload<S: Serialize> {
-    pub payload: S,
+pub struct FCPayload<S: std::fmt::Debug + Payload + Serialize> {
+    pub descriptor: u8,
+    payload: S,
 }
 
-/// Request object (client -> server)
-#[derive(Debug)]
-pub enum Request {
-    /// Echo a message back
-    Echo(String),
-    /// Jumble up a message with given amount of entropy before echoing
-    Jumble { message: String, amount: u16 },
-}
-
-/// Encode the Request type as a single byte (as long as we don't exceed 255 types)
-///
-/// We use `&Request` since we don't actually need to own or mutate the request fields
-impl From<&Request> for u8 {
-    fn from(req: &Request) -> Self {
-        match req {
-            Request::Echo(_) => 1,
-            Request::Jumble { .. } => 2,
-        }
+impl<S: std::fmt::Debug + Payload + Serialize> FCPayload<S> {
+    pub fn _raw(&self) -> Vec<u8> {
+        Vec::new()
     }
-}
 
-/// Message format for Request is:
-/// ```ignore
-/// |    u8    |     u16     |     [u8]      | ... u16    |   ... [u8]         |
-/// |   type   |    length   |  value bytes  | ... length |   ... value bytes  |
-/// ```
-///
-/// Starts with a type, and then is an arbitrary length of (length/bytes) tuples
-impl Request {
-    /// View the message portion of this request
-    pub fn message(&self) -> &str {
-        match self {
-            Request::Echo(message) => message,
-            Request::Jumble { message, .. } => message,
-        }
+    pub fn payload_encrypted(&self, _key: &[u8]) -> Vec<u8> {
+        Vec::new()
     }
 }
 
@@ -94,30 +65,45 @@ impl Request {
 
 /// Abstracted Protocol that wraps a TcpStream and manages
 /// sending & receiving of messages
-pub struct Protocol {
+pub struct CannonLauncher<S: std::fmt::Debug + Payload + Serialize> {
     reader: io::BufReader<TcpStream>,
     stream: TcpStream,
+    payload: Option<FCPayload<S>>,
 }
 
-impl Protocol {
+impl<S: std::fmt::Debug + Payload + Serialize> CannonLauncher<S> {
     /// Wrap a TcpStream with Protocol
     pub fn with_stream(stream: TcpStream) -> io::Result<Self> {
         Ok(Self {
             reader: io::BufReader::new(stream.try_clone()?),
             stream,
+            payload: None,
         })
+    }
+
+    pub fn set_payload(&mut self, payload: FCPayload<S>) -> &mut Self {
+        self.payload = Some(payload);
+
+        trace!("Current payload in [{:p}]: {:?}", &self, self.payload);
+
+        self
+    }
+
+    pub fn clear_payload(&mut self) {
+        self.payload = None;
+        trace!("Cleared payload in [{:p}]", &self);
     }
 
     /// Establish a connection, wrap stream in BufReader/Writer
     pub fn connect(dest: SocketAddr) -> io::Result<Self> {
         let stream = TcpStream::connect(dest)?;
-        eprintln!("Connecting to {}", dest);
+        debug!("Connecting to {}", dest);
         Self::with_stream(stream)
     }
 
     /// Serialize a message to the server and write it to the TcpStream
-    pub fn send_message(&mut self, message: &impl Serialize) -> io::Result<()> {
-        let bdata = bincode::serialize(message).unwrap();
+    pub fn send(&mut self) -> io::Result<()> {
+        let bdata = bincode::serialize(&self.payload).unwrap();
 
         self.stream.write_all(&bdata)?;
         self.stream.flush()
@@ -129,14 +115,9 @@ impl Protocol {
     ///       so only use when a message is expected to arrive
     #[allow(clippy::unused_io_amount)]
     pub fn read_message(&mut self) -> Result<(), io::Error> {
-        let mut outbuffer = vec![0; self.reader.capacity()];
-        self.reader.read(&mut outbuffer)?;
+        let outbuffer = self.reader.fill_buf()?;
 
-        eprintln!(
-            "Incoming ersc encoded [{}] [{:?}]",
-            String::from_utf8_lossy(&outbuffer),
-            self.stream.peer_addr()
-        );
+        let _abuf = outbuffer.to_vec();
 
         Ok(())
     }
